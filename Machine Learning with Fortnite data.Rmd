@@ -1,0 +1,628 @@
+---
+title: "Aplicando machine learning a estadísticas reales de un juego multijugador."
+author: "Yusef Ahsini Ouariaghli, Mikel Baraza Vidal y Pablo Diaz Masa Valencia"
+output: 
+  html_document:
+    toc: true
+    number_sections: false
+    toc_depth: 2
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 1. Introducción.
+
+Fortnite es uno de los juegos más destacados en los últimos años, con millones de jugadores a diario. Consiste en 100 jugadores que se enfrentan, individualmente o en equipos, en un mapa cuyo tamaño se va reduciendo gradualmente hasta quedar restringido a un área diminuta. El objetivo es ser el último jugador o equipo sin ser eliminado, una dinámica tipo Battle Royale similar a la de los juegos del hambre. Se pueden usar armas y construir infraestructuras simples con materiales recolectados por el terreno de juego.
+
+Nuestro objetivo es comprender, haciendo uso de los distintos métodos descriptivos y predictivos aprendidos en la asignatura, cómo afecta la forma de jugar reflejada en las estadísticas a finalizar la partida en un mejor puesto. También pretendemos entender cómo varía el modo de juego de un usario cuando se encuentra bajo los efectos de algún estupefaciente.
+
+```{r carga de datos, include=FALSE}
+library("readxl") 
+user_df = read_excel("Fortnite Statistics.xlsx")
+```
+
+## 2. Nuestra base de datos.
+
+Nuestra base de datos contiene las estadísticas de 87 partidas en equipo de Fortnite, recolectadas después de más de 28 horas de juego ([Fortnite Statistics_80 Games - dataset by kreynol3 \| data.world](https://data.world/kreynol3/fortnite-statistics80-games)). Disponemos de 15 variables después de eliminar la fecha (información más detallada sobre las variables en el *ANEXO 1*).
+
+Transformamos la variable hora de tipo date a númerico y Mental State (si ha consumido cannabis o no) a factor.
+
+```{r tratamiento fechas, include=FALSE}
+#Creamos una variable con la hora de la partida
+user_df$Hour = as.integer(format(user_df$`Time of Day`, "%H")) 
+user_df$Date = NULL #eliminamos las variables tipo date
+user_df$`Time of Day` = NULL
+user_df$`Mental State`= as.factor(user_df$`Mental State`) #la transformamos a factor
+```
+
+## 3. Análisis exploratorio.
+
+Nuestro archivo de datos cuenta con 15 variables, siendo una de ellas categórica y el resto numéricas.
+
+Lo primero que hemos hecho en este apartado es comprobar los valores faltantes en nuestra base de datos mediante la función base de R, `is.null()`, con la que descubrimos que tenemos 0 valores faltantes.
+
+```{r valores faltantes, include=FALSE}
+as.data.frame(colSums(is.na(user_df)))
+```
+
+Lo siguiente es comprobar la distribución de los datos y la existencia de datos anómalos. Mediante gráficos de cajas y bigotes observamos que tenemos valores anómalos por encima de lo normal en la mayoría de variables. Por ahora, mantendremos todas las observaciones a excepción de la partida 22, ya contiene un uso de materiales extremadamente alto.\
+
+```{r analisis exploratorio, echo=FALSE}
+library(ggplot2)
+ggplot(stack(as.data.frame(scale(user_df[,-2], center = TRUE, scale = TRUE))),     aes(x = ind, y = values)) +
+  geom_boxplot() + geom_jitter(width=0.1,alpha=0.2) + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) + 
+  theme(axis.title.x=element_blank(),axis.title.y=element_blank(),
+        axis.text.y=element_blank(), plot.title = element_text(hjust = 0.5)) +     ggtitle("Boxplot con valores centrados")
+```
+
+```{r eliminacion individuo 31, include=FALSE}
+user_df = user_df[-which(user_df$`Materials Used` == max(user_df$`Materials Used`)),] #Eliminamos el individuo 31
+```
+
+También hemos estudiado las correlaciones entre todas nuestras variables, incluida la variable "Mental State" que indica si el jugador esta bajo el consumo de estupefacientes (trasformando la categoría "high" a 1 y "sober" a 0). En la matriz de correlaciones apreciamos que existe correlación positiva entre el consumo de cannabis y la hora de la partidas, mientras que la correlación del estado mental con el resto de variables es negativa aunque no tan pronunciada.
+
+```{r correlaciones, echo=FALSE}
+user_corr = user_df
+user_corr$`Mental State` = ifelse(user_corr$`Mental State` == "high", 1, 0)
+
+col<- colorRampPalette(c("red", "white", "blue"))(30)
+mydata.cor = cor(user_corr, method = c("pearson"))
+heatmap(x = mydata.cor, col = col, symm = TRUE)
+```
+
+Por último, para comprobar si existe una diferencia significativa entre la posición obtenida en las partidas bajo los efectos del cannabis con las partidas sobrias, realizamos un test ANOVA. Observando los resultados del test, podemos afirmar que esta variable no afecta a los puestos logrados en las partidas.
+
+```{r anova, echo=FALSE}
+model <- aov(Placed ~ `Mental State`, data = user_df)
+summary(model)
+```
+
+## 4. PCA.
+
+Vamos a generar un modelo PCA para reducir las dimensiones de nuestros datos y comprender las relaciones entre las variables y los individuos.
+
+El número de componentes que elegimos es 4, ya que explicamos aproximadamente el 74% de la variabilidad de nuestros datos y las componentes siguientes apenas aportan información nueva.
+
+```{r pca componentes, echo=FALSE, message=FALSE}
+library(FactoMineR)
+library(factoextra)
+res.pca = PCA(user_df, scale.unit = TRUE, graph = FALSE, ncp = 10, 
+              quali.sup = c(2))
+eig.val <- get_eigenvalue(res.pca)
+VPmedio = 100 * (1/nrow(eig.val))
+fviz_eig(res.pca, addlabels = TRUE) +
+  geom_hline(yintercept=VPmedio, linetype=2, color="red")
+```
+
+```{r pca final, include=FALSE}
+res.pca = PCA(user_df, scale.unit = TRUE, graph = FALSE, ncp = 4, 
+              quali.sup = c(2))
+```
+
+### Validación del modelo.
+
+#### T2 Hotelling.
+
+El primer metodo de validación del modelo que vamos a usar es el T2 de Hotelling, que nos permite ver qué tan lejos están nuestras observaciones del centro del plano de nuestro PCA. El número de individuos esperados por encima del umbral del 95% (línea naranja) es de 4 observaciones, pero nos encontramos con 5, superando 3 de ellas el umbral del 99% (línea roja). Las mantendremos en el modelo puesto que el hecho de eliminarlas no modifica apenas los resultados (*ANEXO 2*).
+
+```{r t2 hotelling, echo=FALSE}
+K = 4
+misScores = res.pca$ind$coord[,1:K]
+miT2 = colSums(t(misScores**2) / eig.val[1:K,1])
+I = nrow(user_df)
+F95 = K*(I**2 - 1)/(I*(I - K)) * qf(0.95, K, I-K)
+F99 = K*(I**2 - 1)/(I*(I - K)) * qf(0.99, K, I-K)
+plot(1:length(miT2), miT2, type = "l", xlab = "Partidas", ylab = "T2", main = "Distancia al centro del plano")
+abline(h = F95, col = "orange", lty = 2, lwd = 2)
+abline(h = F99, col = "red3", lty = 2, lwd = 2)
+```
+
+#### SCR.
+
+El segundo método de validación para nuestro PCA va a ser fijarnos en la suma de cuadrados residual de nuestras observaciones, que nos permite ver qué tan lejos están del plano generado por el modelo. Como podemos ver, ninguna observación en el gráfico sobrepasa el límite del 99% (línea roja), mientras que 6 lo hacen del límite del 95% (línea naranja). No eliminaremos ninguna de estas observaciones al considerar que la SCR de estos individuos no es tan extrema. Sólo tenemos dos observaciones más de las esperadas, estando una de ellas al borde de no sobrepasar el límite del 95%.
+
+```{r scr, echo=FALSE}
+misLoadings = sweep(res.pca$var$coord, 2, sqrt(res.pca$eig[1:K,1]), FUN="/")
+user_df_escalado = scale(user_df[,-2], center = TRUE, scale = TRUE)
+X = as.matrix(user_df_escalado)
+X[is.na(X)] = 0
+myE = X - misScores %*% t(misLoadings) 
+mySCR = rowSums(myE^2)  
+g = var(mySCR)/(2*mean(mySCR))
+h = (2*mean(mySCR)^2)/var(mySCR)
+chi2lim = g*qchisq(0.95, df = h)
+chi2lim99 = g*qchisq(0.99, df = h)
+
+plot(1:length(mySCR), mySCR, type = "l", main = "Distancia al modelo", 
+     ylab = "SCR", xlab = "Partidas", ylim = c(0,20))
+abline(h = chi2lim, col = "orange", lty = 2)
+abline(h = chi2lim99, col = "red3", lty = 2)
+
+```
+
+### Interpretación del modelo.
+
+Generamos un biplot con las primeras 2 componentes, coloreando los individuos por su posición en la partida (cuanta más baja, mejor) y las variables por su contribución a las primeras dos componentes. Observamos que la primera componente explica perfectamente la varianza de Placed, estando las mejores partidas a la derecha del todo de nuestro gráfico y las peores a la izquierda.
+
+Las variables que más colaboran a la hora de lograr una mejor posición son la cantidad de material recolectado, la distancia recorrida, el número de eliminaciones, la cantidad de material usado y el daño a la estructuras, que son las variables colocadas alrededor de 180º respecto a Placed. Son las variables que más contribuyen a la primera componente (*ANEXO 3*).
+
+También podemos ver que la precisión de los disparos, el número de disparos, los headshots y las veces que el jugador es revivido por el compañero no afectan apenas a la posición final en la partida. Estas son variables mejor explicadas por la segunda componente (*ANEXO 4*).
+
+```{r biplot1, echo=FALSE}
+fviz_pca_biplot(res.pca, axes = c(1,2), col.var = "contrib", label = "var",
+                repel = TRUE, col.ind = user_df$Placed, gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"))
+```
+
+El siguiente biplot está generado con la primera y la tercera componentes, coloreando a los individuos según la categoría de Mental State. Podemos observar que la tercera componente separa bastante bien las partidas jugadas bajo los efectos del cannabis y las partidas jugadas en estado de sobriedad. También observamos que los valores de la cantidad de veces que revive, la hora y el número de asitencia son mayores en las partidas en las que se el usuario se encuntra bajo influencia. Estás tres variables son las que explican mayoritariamente la tercera componente (*ANEXO 5*).
+
+```{r biplot2, echo=FALSE, warning=FALSE}
+fviz_pca_biplot(res.pca, axes = c(3,1), geom = c("point"), habillage = "Mental State", repel=TRUE)
+```
+
+## 5. Clustering.
+
+Consideramos interesante realizar un análisis de clustering sobre nuestra base de datos con la finalidad de agrupar las partidas según sus característica y, detectar posibles grupos de partidas similares entre ellas y causas probables de estas similitudes.
+
+LLevamos a cabo la creación del mapa de color para hacernos una idea de cómo se distribuirán los datos. Optamos por usar la distancia de Manhattan ya que es la que menos afectada se ve por los valores anómalos que poseemos.
+
+```{r MAPA DE COLOR, echo = FALSE}
+library(NbClust)
+library(clValid)
+library(stats)
+user_df_centrado = scale(user_df[,-2], center = TRUE, scale = TRUE)
+dist = get_dist(user_df_centrado, stand = FALSE, method = 'manhattan')
+fviz_dist(dist, show_labels = TRUE, lab_size = 0.3,
+          gradient = list(low = "#00AFBB", mid = "white", high = "#FC4E07"))
+```
+
+El mapa de color nos muestra cÓmo se agrupan los datos en aproximadamente unos 3 clusters y vemos que dentro de uno de ellos se encontrarán la mayoría de partidas.
+
+Calculamos el estadístico Hopkins para comprobar si existe una tendencia de agrupamiento de los datos.
+
+```{r Hopkins, echo=FALSE, message=FALSE, warning=FALSE}
+set.seed(100)
+myN = c(20, 35, 50, 65) 
+myhopkins = NULL
+myseed = sample(1:1000, 10)
+for (i in myN) {
+  for (j in myseed) {
+    tmp = get_clust_tendency(data = user_df_centrado, n = i, graph = FALSE, seed = j)
+    myhopkins = c(myhopkins, tmp$hopkins_stat)
+  }
+}
+summary(myhopkins)
+```
+
+Este cálculo nos indica la existencia de tendencia de agrupamiento, ya que sus valores oscilan entre 0,6 y 0,7.
+
+### 5.1. Modelos jerárquicos.
+
+Al observar los modelos jerárquicos nos damos cuenta de que el método de la media nos arroja un resultado no coincidente con el del mapa de color, ya que encontramos un cluster enorme que engloba casi todas las partidas.
+
+Al explorar otras opciones (método de Ward y método del vecino más lejano), obtenemos resultados bastante razonables en ambas, ya que se agrupan las partidas de manera similar a la del mapa de color. Encontramos mínimas diferencias, ya que se incluyen pocos elementos más en un grupo que en el otro al compararlos. Optamos por utilzar el método de Ward, pues consideramos que es el más cercano a lo que podemos observar en el mapa de color ya que dos de los tres grupos parecen bastante similares en cuanto a tamaño (*ANEXO 6*).
+
+```{r GRUPOS, include = FALSE}
+clust1 <- hclust(dist, method="ward.D2")
+grupos1 <- cutree(clust1, k=3)
+
+#-----------------------
+
+clust2 <- hclust(dist, method="average")
+grupos2 = cutree(clust2, k = 3)
+
+#----------------------
+clust3 <- hclust(dist, method="complete")
+grupos3 = cutree(clust3, k = 3)
+```
+
+### 5.2. K-means.
+
+Ahora vamos a aplicar el algortimo de K-means para clusterizar nuestras observaciones. Utilizamos diferentes métodos existentes para obtener el número de clusters con los que agrupar nuestros datos. La mayoría de estos metodos nos recomiendan el uso de 2 clusters.
+
+```{r, echo=FALSE}
+conjunto <- NbClust(data = user_df_centrado[,-2], diss = dist, distance = NULL, 
+                        min.nc = 2, max.nc = 10, 
+                        method = "kmeans", index ="all") 
+```
+
+### 5.3. Selección del método de clustering.
+
+Para llevar a cabo la selección del método, inicialmente visualizamos los grupos creados empleando un k=2, ya que es el recomendado. Utilizamos Ward, k-means y k-medoides (en el *ANEXO 7* se explica la selección del número de clusters para los métodos de Ward y k-medoides).
+
+```{r seleccion modelo, include= FALSE}
+#WARD
+grupo1 <- cutree(clust1, k=2)
+#-----------------
+#KMEANS
+set.seed(100)
+grupo2 <- kmeans(user_df_centrado, centers = 2, nstart = 20)
+#---------------
+#K-MEDOIDES
+grupo3 <- pam(user_df_centrado, k = 2)
+```
+
+Consideramos que k-medias nos devuelve el mejor resultado ya que obtenemos un mejor valor de coeficiente de silhouette y además agrupa mejor a nuestros individuos. Tenemos valores aceptables, por lo que consideramos que la configuración de los grupos es apropiada.
+
+```{r REPRESENTACIÓN MODELO, echo = FALSE}
+par(mfrow = c(1,3))
+plot(silhouette(grupo1, dist), col=rainbow(2), border=NA, main = "WARD")
+plot(silhouette(grupo2$cluster, dist), col=rainbow(2), border=NA, main = "K-MEDIAS")
+plot(silhouette(grupo3$clustering, dist), col=rainbow(2), border=NA, main = "K-MEDOIDES")
+```
+
+```{r, include = FALSE}
+k2 = kmeans(dist, centers = 2, nstart  =25 ) 
+k2
+```
+
+### 5.4. Interpretación de los resultados.
+
+Visualizamos los resultados primero dentro de la primera y segunda componentes del módelo PCA anteriormente generado y después en la primera y la tercera.
+
+```{r INTERPRETAR RESULTADOS, echo=FALSE, warning=FALSE}
+fviz_cluster(k2, data = user_df_centrado, ellipse.type = "convex", repel = TRUE, star.plot = TRUE, axes = c(1,2))
+fviz_cluster(k2, data = user_df_centrado, ellipse.type = "convex", repel = TRUE, star.plot = TRUE, axes = c(1,3))
+```
+
+Tras visualizar la comparación de la primera con la segunda componente del PCA, nos damos cuenta de que separa perfectamente las partidas con mejores y peores resultados. Fijándonos en la primera y la tercera componentes, la separación de nuestros clusters por la tercera componente es nula, indicador de que el usuario realiza buenas partidas incluso bajo el efecto del cannabis.
+
+#### Perfil medio.
+
+Para estudiar el perfil medio, calculamos la media de cada variable para cada cluster. Como hemos dicho, nuestro clustering agrupa las partidas en un grupo de mejores partidas y otro de peores. Vemos cómo en aquellas mejores (línea roja), obtenemos valores como posición, que toma un valor bajo ya que será cercana a uno y el resto de variables toman valores por encima de la media normalmente. Podemos observar como la variable "Accuracy" toma valores menores. Esto se debe a que, al ser partidas más largas, el número de disparos es mayor y con ello aumenta el número de disparos fallados (haciendo que disminuya la precisión).
+
+```{r PERFIL MEDIO, echo = FALSE}
+misclust = factor(grupo2$cluster)
+mediasCluster = aggregate(user_df_centrado, by = list("cluster" = misclust), mean)[,-1]
+rownames(mediasCluster) = paste0("c",1:2)
+#--------------------------------
+matplot(t(mediasCluster), type = "l", col = rainbow(2), ylab = "", xlab = "", lwd = 2,
+        lty = 1, main = "Perfil medio de los clusters", xaxt = "n")
+axis(side = 1, at = 1:ncol(user_df_centrado), labels = colnames(user_df_centrado), las = 2)
+legend("topleft", as.character(1:2), col = rainbow(2), lwd = 2, ncol = 3, bty = "n")
+```
+
+## 6. Análisis discriminante.
+
+Ahora, en respuesta a uno de los objetivos del proyecto, vamos a generar un análisis discriminante para predecir si nuestro usuario esta bajo los efectos del cannabis en función de las estadísticas de la partida. Nuestra variable "Mental State" , que es la que queremos predecir, está balanceada casi a la mitad entre las dos categorías posibles.
+
+```{r, include=FALSE}
+table(user_df$`Mental State`)
+```
+
+Ahora vamos a crear un modelo LDA con nuestras observaciones. El metodo de validación cruzada que vamos a usar en este caso es "leave-one-out", al contar solo con 86 observaciones. Una vez creado el modelo podemos ver que nuestro Indice de Kappa es aproximadamente 0.4, por lo que es mejor clasificador que un modelo al azar, pero alejado de ser mucho mejor. También destacamos que la precisión del modelo es de un 69%.
+
+```{r lda, echo=FALSE, warning=FALSE}
+library(caret)
+user_df_escalado = user_df
+user_df_escalado[,-2] = scale(user_df[,-2], center = TRUE, scale = TRUE)
+modeloTR = train(`Mental State`~ ., data = user_df_escalado, method='lda', 
+                 trControl = trainControl(method = "LOOCV") )  
+modeloTR
+```
+
+### Interpretación del modelo.
+
+Obtenemos la matriz de confusión y medidas de error para los datos con los que entrenamos el modelo, ya que al tener tan solo 86 observaciones no contamos datos test. Consideramos como valor positivo a la categoría "high" (bajo los efectos del cannabis). Podemos observar que nuestra función discriminante tiene una sensibilidad del 83%, lo que significa que predice bastante de las veces que nuestro usuario está jugando bajo los efectos del cannabis.
+
+```{r confusion matriz lda, echo=FALSE}
+ajusteTR = predict(modeloTR, user_df_escalado)
+caret::confusionMatrix(ajusteTR, factor(user_df_escalado$`Mental State`), positive = "high")
+```
+
+Las variables con más poder discriminante son las eliminaciones, la hora de la partida y el daño a usuarios, como podemos constatar en la graficas de coeficientes de discriminación. Si nos fijamos en las medias de las variables para los dos grupos (*ANEXO 8*), podemos ver que las horas y las eliminaciones tienen una media más alta cuando el usuario está "high", mientras que el daño a otros usarios tiene menor media en estos casos. También podemos ver que la media de la precisión es bastante más baja en las partidas bajo influencia.
+
+```{r coeficientes lda, echo=FALSE}
+myW = modeloTR$finalModel$scaling[,1]
+barplot(sort(abs(myW), decreasing = TRUE), las = 2, cex.names = 0.5, col=c("#007FAA"),) 
+title(main = list("Absolute coefficients of linear discriminants", font = 4))
+```
+
+## 7. PLS.
+
+```{r librerias pls, include=FALSE}
+library(ropls)
+library(corrplot)
+library(ModelMetrics)
+```
+
+Realizamos un PLS utilizando todas las variables numéricas de nuestra base de datos para predecir la variable Placed, que indica el puesto en el que ha quedado el jugador en la partida (el mejor puesto posible es 1 y el peor 100).
+
+```{r matrices pls ,include=FALSE}
+# matrices para PLS
+X = user_df[,-c(1,2)]  # sin Placed ni Mental State
+Y = user_df$Placed
+```
+
+En base a los valores de R2(cum) y Q2(cum) dependiendo del número de componentes (*ANEXO 9*), elegimos generar el modelo PLS con 2 componentes. Además, como tenemos un número reducido de observaciones, optamos por emplear el método de validación cruzada "leave one out".
+
+```{r include=FALSE}
+# generamos el modelo con 2 componentes
+plsFN <- opls(x = X, y = Y, predI = 2, crossvalI = nrow(X), scaleC = "standard")
+```
+
+### Interpretación del modelo PLS.
+
+En primer lugar, intentamos detectar casos mal explicados por el modelo mediante la SCR (suma de cuadrados residuales). Este indicador es más alto en aquellas observaciones que peor se ajustan al modelo generado.
+
+```{r echo=FALSE}
+scoresX = plsFN@scoreMN
+loadingsX = plsFN@loadingMN
+erroresX = scale(X) - scoresX%*%t(loadingsX) 
+SCRsX = rowSums(erroresX^2)   # SPE 
+plot(1:length(SCRsX), SCRsX, type = "l", main = "Suma de Cuadrados Residuales", 
+     ylab = "SCR", xlab = "Partidas", ylim = c(0,40))
+g = var(SCRsX)/(2*mean(SCRsX))
+h = (2*mean(SCRsX)^2)/var(SCRsX)
+chi2lim95 = g*qchisq(0.95, df = h)
+chi2lim99 = g*qchisq(0.99, df = h)
+abline(h = chi2lim95, col = 'orange', lty = 2)
+abline(h = chi2lim99, col = 'red3', lty = 2)
+```
+
+Como podemos observar, hay sólo 5 observaciones que superan el límite de confianza del 95% (línea naranja). Se puede considerar que esta cantidad está dentro de lo normal. Además, la partida 52 supera el límite de confianza del 99%. Consideramos eliminarla, pero queremos guiarnos primero por los valores de T2 Hotelling. Para decidir si eliminar esta observación y detectar otros valores anómalos dentro del modelo, generamos el gráfico de T2 Hotelling de nuestro modelo.
+
+```{r echo=FALSE}
+scoresX = plsFN@scoreMN
+varT = apply(scoresX, 2, var)
+T2sX = colSums(t(scoresX**2) / varT)
+N = nrow(X)
+A = 2
+F95 = A*(N**2 - 1)/(N*(N - A)) * qf(0.95, A, N-A)
+F99 = A*(N**2 - 1)/(N*(N - A)) * qf(0.99, A, N-A)
+plot(1:length(T2sX), T2sX, type = "l", xlab = "Partidas", ylab = "T2",
+     main = "T2-Hotelling", ylim = c(0,13))
+abline(h = F95, col = "orange", lty = 2, lwd = 2)
+abline(h = F99, col = "red3", lty = 2, lwd = 2)
+```
+
+Si bien detectamos varias observaciones que superan el límite de confianza del 95%, ninguna supera el límite del 99%. Este es un buen indicador, pues nos sirve para descartar la presencia de anómalos severos en el modelo. Además, la partida 52 no presenta un valor extremadamente alto, por lo que decidimos no eliminarla de nuestro modelo por ahora. Para descartar definitivamente esta eliminación, decidimos visualizar la contribución de cada variable a la SCR de esta observación concreta generando un gráfico de contribuciones.
+
+```{r include=FALSE}
+#scoresX = plsFN@scoreMN
+#loadingsX = plsFN@loadingMN
+#erroresX = scale(X) - scoresX%*%t(loadingsX) 
+#SCRsX = rowSums(erroresX^2)
+
+# usando una función, generamos la matriz de contribuciones a la SCR
+ContriSCR = function(E, SCR) {
+  contribucion = NULL
+  for (j in 1:length(SCR)){
+    eind<-E[j,]
+    signo<-sign(eind)
+    contri<-(signo*(eind^2)/SCR[j])*100
+    contribucion<-rbind(contribucion,contri)
+  }
+  rownames(contribucion) = rownames(E)
+  return(contribucion)
+}
+contribuciones = ContriSCR(E = erroresX, SCR = SCRsX)
+```
+
+```{r echo=FALSE}
+barplot(contribuciones[52,], las=2, cex.names=0.5, col=3,
+        main=c('Contribuciones a SCR para la partida 52'))
+```
+
+Vemos que el valor que más contribuye a la SCR, es decir, el que más difiere respecto a las tendencias generales representadas en el modelo, es el número de Head Shots. En un principio, pensamos que se debía a un valor erróneo en la base de datos. No obstante, hemos comprobado que, si bien el valor es bastante alto comparado con la tendencia general, sí encaja con los valores de otras variables de la partida 52. Por tanto, decidimos no eliminar la observación.
+
+### Comprobación del modelo PLS.
+
+Finalmente, usamos el modelo validado para predecir la variable Placed. De esta manera, para cada conjunto de valores de nuestras variables predictivas, nuestro modelo arroja un número que indica el puesto en que quedará el jugador en una partida de tales características.
+
+```{r include=FALSE}
+Ypred = predict(plsFN)
+```
+
+Para corregir el obstáculo para la comprensión que implica la naturaleza continua de los valores predichos, preferimos redondear cada predicción a su valor entero más cercano mayor o igual que 1 y menor o igual que 100. De esta manera, para una predicción cuyo valor sea 8.123726, el puesto estimado será 8, octavo.
+
+```{r include=FALSE}
+Ypred_round = round(Ypred)
+Ypred_round[which(Ypred_round < 1)] = 1
+```
+
+Con el objetivo de constatar gráficamente la precisión predictiva del modelo, generamos un gráfico de dispersión que relaciona los valores reales con los valores predichos ya redondeados. Para una mejor comprensión, los casos cuyo valor predicho dista más de 15 puestos de su valor real aparecen recuadrados en naranja.
+
+```{r echo=FALSE}
+# generamos la gráfica de dispersión
+plot(Y, Ypred_round, asp = 1, xlab = "Reales", ylab = "Predichos (r.)", pch=20,
+     main='Puestos reales vs predichos',
+     sub='*las partidas cuyo valor predicho dista más de 15 puestos del valor real aparecen recuadradas')
+abline(a=0, b=1, col = "red3", lwd = 2, lty = 2)  # dibujar la recta y = x
+abline(v=40, col = "blue3", lwd = 1, lty = 2)  # línea vertical
+
+# valores con residuo absoluto mayor que 'límite' (diferencia entre valor real y predicho)
+residuosPred = Y-Ypred_round
+residuos_abs = abs(residuosPred)
+limite = 15
+points(Y[residuos_abs >= limite], Ypred_round[residuos_abs >= limite], col='orange3', pch=-as.hexmode('2395'))
+```
+
+Como vemos en la gráfica, nuestro modelo es bueno prediciendo con un margen de error no demasiado grande la amplia mayoría de los casos. Cabe destacar que el peor puesto que predice el modelo es el 40, a pesar de que un jugador puede morir antes y quedar en el puesto 100, 80 o 55, por ejemplo. A causa de esto, el modelo es eficiente prediciendo puestos comprendidos entre 1 y 40, pero a partir de 40 empieza a fallar cada vez más. Sin embargo, esto no puede considerarse un fracaso, pues para un jugador cualquiera la diferencia entre quedar 40º o 70º es mínima, pues lo que importa es obtener puestos más cercanos al 1º.
+
+El error cuadrático medio es 7.63, el más bajo que hemos logrado probando diferentes modelos y parámetros. Sin embargo, si sólo tenemos en cuenta las partidas con puesto menor de 40, que son las mejor predichas de nuestro modelo, el RMSE desciende a 5.41. Esto supone una mejora significativa del error, constatando una vez más el buen potencial predictivo del modelo PLS para partidas de puesto inferior a 40.
+
+```{r, include=FALSE}
+rmse(Y,Ypred_round)
+rmse(Y[which(Y <= 40)],Ypred_round[which(Y <= 40)])
+```
+
+Por último, observando los coeficientes de regresión, la mayoría de variables tienen una relación inversa con la posición final (hacen que sea más baja, algo positivo). Destacando las variables que miden la distancia viajada, el material usado o las eliminaciones. Resultado esperado observando el PCA hecho anteriormente. También podemos ver que las variables hora y precisión afectan postivamente a la posición (a ser más alta, algo que no buscamos).
+
+```{r, echo=FALSE}
+par(mar=c(10, 3, 5, 10))
+barplot(sort(plsFN@coefficientMN[,1]), las=2)
+title("Coeficiente de regresión PLS para variables centradas")
+```
+
+## 8. Conclusión.
+
+Gracias al PCA, sabemos qué variables influyen más y menos en lograr un mejor puesto en la partida. Ademas, podemos utilizar otras variables para separar bastante bien entre partidas jugadas sobrio o bajo influencias.
+
+Con el clustering, encontramos qué tipos de partidas existen, cómo agruparlas y qué afecta a esta agrupación.
+
+El análisis discriminante clasifica con relativo éxito las partidas jugadas según el estado mental del jugador.
+
+Por último, nuestro PLS sirve para predecir satisfactoriamente el puesto logrado en la partida en función del resto de variables numéricas.
+
+Los métodos estudiados que no hemos aplicado son AFC, pues sólo tenemos una variable categórica; reglas de asociación, ya que nuestra base de datos no está estructurada en forma de transacciones; y PLS-DA, dado que tanto la R2 como la Q2 eran demasiado bajas independientemente del número de componentes.
+
+## ANEXOS.
+
+### ANEXO 1 : Variables de nuestra base de datos.
+
+La base de datos usada cuenta con 15 variables:
+
+`Placed` -\> Posición final en la partida, siendo 1 la mejor y 100 la peor posible.
+
+`Mental State` -\> Indica si el jugador esta bajo los efecto del cannabis cuando es igual a "high".
+
+`Eliminations` -\> Número de muertes causadas por el jugador en la partida.
+
+`Assists` -\> Número de asistencias a otros jugadores hechas en la partida (dejar a un oponete a un disparo de ser eliminado)
+
+`Revives` -\> Número de veces que el jugador es revivido por un compañero después de ser eliminado (esto esta permitido en una pequeña ventana de tiempo después de ser eliminado)
+
+`Accuracy` -\> Precisión de los disparos del jugador durante la partida (Disparos que alcanzan a un rival/ total disparos)
+
+`Hits` -\> Número de disparos hechos durante la partida.
+
+`Head Shots` -\> Número de disparos en la cabeza de un rival (máximo daño).
+
+`Distance Traveled` -\> Distancia recorrida durante la partida.
+
+`Materials Gathered` -\> Número de materiales recogidos durante la partida.
+
+`Materials Used` -\> Número de materiales usados durante la partida.
+
+`Damage Taken` -\> Daño recibido durante la partida.
+
+`Damage to Players` -\> Daño causado a los rivales durante la partida.
+
+`Damage to Structures` -\> Daño causado a estructuras durante la partida.
+
+`Hour` -\> Hora en la que se ha jugado la partida.
+
+### ANEXO 2 : Modelo sin observaciones extremas.
+
+Recalculamos el modelo PCA sin las valoraciones extremas de nuestro PCA original. La variabilidad explicada por los nuevas componentes es casi identica al PCA original.
+
+```{r modelo sin extremos, echo=FALSE}
+res.pca = PCA(user_df[-which(miT2 > F99),], scale.unit = TRUE, graph = FALSE, ncp = 10, 
+              quali.sup = c(2))
+eig.val <- get_eigenvalue(res.pca)
+VPmedio = 100 * (1/nrow(eig.val))
+fviz_eig(res.pca, addlabels = TRUE) +
+  geom_hline(yintercept=VPmedio, linetype=2, color="red")
+```
+
+Una vez fijado el número de componentes en 4 en nuestro nuevo modelo PCA, observamos que al calcular el T2 de Hotelling para el nuevo modelo volvemos a obtener 3 variables por encima del umbral del 99% (linea roja) y 6 observaciones por encima del 95% (linea amarilla), una más que en el modelo sin eliminar las variables. Por esto consideramos inecesario eliminarlas basandonos en este criterio.
+
+```{r modelo sin extremos 2, echo=FALSE}
+res.pca = PCA(user_df[-which(miT2 > F99),], scale.unit = TRUE, graph = FALSE, ncp = 4, 
+              quali.sup = c(2))
+
+K = 4
+misScores = res.pca$ind$coord[,1:K]
+miT2 = colSums(t(misScores**2) / eig.val[1:K,1])
+I = nrow(user_df)
+F95 = K*(I**2 - 1)/(I*(I - K)) * qf(0.95, K, I-K)
+F99 = K*(I**2 - 1)/(I*(I - K)) * qf(0.99, K, I-K)
+plot(1:length(miT2), miT2, type = "l", xlab = "Partidas", ylab = "T2", main = "Distancia al centro del plano")
+abline(h = F95, col = "orange", lty = 2, lwd = 2)
+abline(h = F99, col = "red3", lty = 2, lwd = 2)
+
+```
+
+### ANEXO 3: Contribución de variables a la primera componente del PCA.
+
+```{r contrib-componentes 1, echo=FALSE}
+fviz_contrib(res.pca, choice = "var", axes = 1)
+```
+
+### ANEXO 4: Contribución de variables a la segunda componente del PCA.
+
+```{r contrib-componentes 2, echo=FALSE}
+fviz_contrib(res.pca, choice = "var", axes = 2)
+```
+
+### ANEXO 5: Contribución de variables a la tercera componente del PCA.
+
+```{r contrib-componentes 3, echo=FALSE}
+fviz_contrib(res.pca, choice = "var", axes = 3)
+```
+
+### ANEXO 6: Representación gráfica del clustering jerárquico.
+
+Metodo de ward
+
+```{r representacion ward, echo=FALSE, message=FALSE, warning=FALSE}
+fviz_dend(clust1, k = 3,
+          cex = 0.5, color_labels_by_k = TRUE,
+          rect = TRUE) 
+```
+
+Método de la media
+
+```{r representacion media, echo=FALSE, message=FALSE, warning=FALSE}
+fviz_dend(clust2, k = 3,
+          cex = 0.5, color_labels_by_k = TRUE,
+          rect = TRUE) 
+```
+
+Método complete.
+
+```{r representacion complete, echo=FALSE,message=FALSE, warning=FALSE}
+fviz_dend(clust3, k = 3,
+          cex = 0.5, color_labels_by_k = TRUE,
+          rect = TRUE) 
+```
+
+### ANEXO 7: selección de clusters de el metdodo de ward y k-medoides.
+
+Aquí obtenemos el númer de clusters para el metodo de Ward y K-medoides, mediante coeficiente de Silhouette. Observamos que para ambos casos el número de clusters recompendados son dos si usamos el metodo de elbow.
+
+```{r  warning = FALSE, echo  = FALSE}
+
+fviz_nbclust(x = user_df_centrado, FUNcluster = hcut, method = "silhouette", hc_method = "ward.D2",
+             k.max = 10, verbose = FALSE, hc_metric = "manhattan") +
+  labs(title = "Numero optimo de clusters")
+
+fviz_nbclust(x = user_df_centrado, FUNcluster = pam, method = "silhouette", 
+             k.max = 10, verbose = FALSE) +
+  labs(title = "Numero optimo de clusters")
+
+```
+
+### ANEXO 8: Media de las variables por categoría.
+
+```{r medias lda, echo=FALSE}
+as.data.frame(t(modeloTR$finalModel$means))
+```
+
+### ANEXO 9: Elección componetes PLS.
+
+Generamos un gráfico de líneas que muestra los valores de R2(cum) en rojo y Q2(cum) en azul para cada número de componentes posible (de 1 a 13). Vemos que tanto R2 como Q2 crecen al pasar de 1 a 2 componentes. Al pasar a 3 componentes, si bien R2 sigue creciendo, Q2 empieza a descender y ya no vuelve a subir. Por tanto, elegimos 2 componentes para nuestro modelo.
+
+```{r pls max componetes,  include=FALSE}
+# modelo con el número máximo de componentes
+plsFNC = opls(x = X, y = Y, predI = length(X), crossvalI = nrow(X), scaleC = "standard",
+              fig.pdfC = "none")
+```
+
+```{r echo=FALSE}
+# gráfico
+plot(1:length(X), plsFNC@modelDF$'R2Y(cum)', type = "o", pch = 16, col = "red3",
+     lwd = 2, xlab = "Número de componentes", ylab = "", ylim = c(0.1,0.8),
+     main = "Modelo PLS: Partidas de Fortnite")
+lines(1:length(X), plsFNC@modelDF$'Q2(cum)', type = "o", pch = 16, col = "blue3",
+      lwd = 2)
+abline(h = 0.6, col = "red3", lty = 2)
+legend("bottomleft", c("R2Y", "Q2"), lwd = 2, 
+       col = c("red3", "blue3"), bty = "n")
+```
